@@ -1,0 +1,4 @@
+tls:
+  certificate: {{ .fragments.tls.cert }}
+  certificate_key: {{ .fragments.tls.key }}
+  min_version: TLSv{{ .fragments.tls.min_version }}

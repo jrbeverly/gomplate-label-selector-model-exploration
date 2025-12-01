@@ -1,0 +1,122 @@
+# Object-local catalog. Contribution values are gomplate expressions evaluated
+# against the intent object, so no second parameter language is needed.
+- name: baseline-limits
+  kind: context
+  priority: 0
+  selector: {}
+  contributes:
+    limits:
+      timeout: "30s"
+      retries: "1"
+
+- name: production-limits
+  kind: context
+  priority: 50
+  selector:
+    labels:
+      matchValues:
+        env: "production"
+  contributes:
+    limits:
+      timeout: "5s"
+
+- name: managed-baseline
+  kind: context
+  priority: 10
+  selector:
+    labels:
+      matchExpressions:
+        - key: managed
+          operator: Exists
+  contributes:
+    managed:
+      owner: "platform"
+      reload: "graceful"
+
+- name: high-worker-tuning
+  kind: context
+  priority: 20
+  selector:
+    spec:
+      matchExpressions:
+        - key: workers
+          operator: Gt
+          values: ["4"]
+  contributes:
+    tuning:
+      connection_pool: "512"
+
+- name: ratelimit-exemption
+  kind: context
+  priority: 90
+  disables: [production-web-ratelimit]
+  selector:
+    labels:
+      matchValues:
+        ratelimit/exempt: "true"
+  contributes:
+    exemptions:
+      ratelimit: "true"
+
+- name: production-web-ratelimit
+  kind: partial
+  priority: 30
+  partial: ratelimit
+  selector:
+    labels:
+      matchValues:
+        env: "production"
+      matchExpressions:
+        - key: tier
+          operator: In
+          values: ["web"]
+  contributes:
+    rps: "100"
+    burst: "200"
+
+- name: tls-termination
+  kind: partial
+  priority: 20
+  partial: tls
+  selector:
+    labels:
+      matchValues:
+        tls: "true"
+  contributes:
+    cert: '{{ printf "/etc/certs/%s.pem" .name }}'
+    key: '{{ printf "/etc/certs/%s.key" .name }}'
+    min_version: '{{ default "1.3" (index .annotations "tls/min-version") }}'
+
+- name: metrics-scrape
+  kind: partial
+  priority: 20
+  partial: metrics
+  selector:
+    annotations:
+      matchExpressions:
+        - key: metrics/interval
+          operator: Exists
+  contributes:
+    interval: '{{ index .annotations "metrics/interval" }}'
+    path: '{{ default "/metrics" (index .annotations "metrics/path") }}'
+
+- name: canary-routing
+  kind: transform
+  priority: 40
+  transform: canary-split
+  partial: canary
+  selector:
+    annotations:
+      matchExpressions:
+        - key: canary/weight
+          operator: Exists
+
+- name: unmanaged-warning
+  kind: policy
+  priority: 0
+  policy: require-managed
+  selector:
+    labels:
+      matchExpressions:
+        - key: managed
+          operator: DoesNotExist

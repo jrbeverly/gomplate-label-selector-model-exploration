@@ -1,0 +1,13 @@
+# Added behavior needing one new fragment, paired with fixtures/tracing.tmpl.
+- name: tracing-export
+  kind: partial
+  priority: 35
+  partial: tracing
+  selector:
+    annotations:
+      matchExpressions:
+        - key: metrics/interval
+          operator: Exists
+  contributes:
+    endpoint: "otlp://collector:4317"
+    sample_rate: "0.1"

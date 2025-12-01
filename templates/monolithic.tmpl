@@ -1,0 +1,48 @@
+{{- /* Counterfactual: the same output, but every decision made here by
+inspecting raw metadata. Cannot express pool membership or the digest at all. */ -}}
+name: {{ .name }}
+port: {{ .spec.port }}
+workers: {{ .spec.workers }}
+{{- if eq (printf "%v" (index .labels "ratelimit/exempt")) "true" }}
+exemptions:
+  ratelimit: {{ index .labels "ratelimit/exempt" }}
+{{- end }}
+limits:
+  retries: 1
+  timeout: {{ if eq (printf "%v" (index .labels "env")) "production" }}5s{{ else }}30s{{ end }}
+{{- if coll.Has .labels "managed" }}
+managed:
+  owner: platform
+  reload: graceful
+{{- end }}
+{{- if gt (conv.ToInt64 .spec.workers) 4 }}
+tuning:
+  connection_pool: 512
+{{- end }}
+{{- if coll.Has .annotations "canary/weight" }}
+routes:
+  - target: {{ .name }}-canary
+    weight: {{ index .annotations "canary/weight" }}
+  - target: {{ .name }}-stable
+    weight: {{ math.Sub 100 (conv.ToInt64 (index .annotations "canary/weight")) }}
+{{- end }}
+{{- if and (eq (printf "%v" (index .labels "env")) "production") (eq (printf "%v" (index .labels "tier")) "web") (ne (printf "%v" (index .labels "ratelimit/exempt")) "true") }}
+rate_limit:
+  requests_per_second: 100
+  burst: 200
+{{- end }}
+{{- if coll.Has .annotations "metrics/interval" }}
+metrics:
+  endpoint: {{ if coll.Has .annotations "metrics/path" }}{{ index .annotations "metrics/path" }}{{ else }}/metrics{{ end }}
+  scrape_interval: {{ index .annotations "metrics/interval" }}
+{{- end }}
+{{- if eq (printf "%v" (index .labels "tls")) "true" }}
+tls:
+  certificate: /etc/certs/{{ .name }}.pem
+  certificate_key: /etc/certs/{{ .name }}.key
+  min_version: TLSv{{ if coll.Has .annotations "tls/min-version" }}{{ index .annotations "tls/min-version" }}{{ else }}1.3{{ end }}
+{{- end }}
+{{- if not (coll.Has .labels "managed") }}
+# diagnostics
+# warning require-managed: {{ .name }} carries no managed label; platform behaviors do not apply
+{{- end }}

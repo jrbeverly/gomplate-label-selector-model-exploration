@@ -1,0 +1,11 @@
+# Collides with production-limits: same leaf, same priority.
+- name: rival-limits
+  kind: context
+  priority: 50
+  selector:
+    labels:
+      matchValues:
+        env: "production"
+  contributes:
+    limits:
+      timeout: "1s"

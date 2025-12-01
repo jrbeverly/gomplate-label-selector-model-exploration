@@ -1,0 +1,18 @@
+name: {{ .name }}
+port: {{ .spec.port }}
+workers: {{ .spec.workers }}
+{{- range $group := (.context | coll.Keys | coll.Sort) }}
+{{ $group }}:
+{{- range $key := (index $.context $group | coll.Keys | coll.Sort) }}
+  {{ $key }}: {{ index $.context $group $key }}
+{{- end }}
+{{- end }}
+{{- range $partial := .partials }}
+{{ tmpl.Exec (printf "partials/%s.tmpl" $partial) $ | strings.TrimSpace }}
+{{- end }}
+{{- if .diagnostics }}
+# diagnostics
+{{- range $d := .diagnostics }}
+# {{ $d.severity }} {{ $d.policy }}: {{ $d.message }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,5 @@
+routes:
+  - target: {{ .name }}-canary
+    weight: {{ .fragments.canary.canary_weight }}
+  - target: {{ .name }}-stable
+    weight: {{ .fragments.canary.stable_weight }}

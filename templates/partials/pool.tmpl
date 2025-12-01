@@ -1,0 +1,7 @@
+upstream_pool:
+  name: {{ .fragments.pool.name }}
+  members:
+{{- range $m := .fragments.pool.members }}
+    - host: {{ $m.name }}
+      port: {{ $m.port }}
+{{- end }}

@@ -1,0 +1,32 @@
+# The three a per-object template cannot express: two need sibling objects, one
+# needs a stage after rendering. Catalogs are plain lists, so they concatenate.
+- name: pool-membership
+  kind: transform
+  priority: 25
+  scope: group
+  groupBy: pool
+  transform: pool-members
+  partial: pool
+  selector:
+    labels:
+      matchExpressions:
+        - key: pool
+          operator: Exists
+
+- name: pool-port-collision
+  kind: policy
+  priority: 0
+  scope: group
+  groupBy: pool
+  policy: unique-ports
+  selector:
+    labels:
+      matchExpressions:
+        - key: pool
+          operator: Exists
+
+- name: config-digest
+  kind: postprocess
+  priority: 0
+  postprocess: sha256-footer
+  selector: {}

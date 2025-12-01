@@ -1,0 +1,14 @@
+# Added behavior needing no new template asset at all.
+- name: audit-trail
+  kind: context
+  priority: 15
+  selector:
+    labels:
+      matchExpressions:
+        - key: env
+          operator: In
+          values: ["production"]
+  contributes:
+    audit:
+      sink: '{{ printf "s3://audit/%s" .name }}'
+      retention: "90d"

@@ -1,0 +1,183 @@
+{{- /*
+Resolver. Evaluates the behavior catalog against one intent object and emits the
+resolved document that service.tmpl renders. Given the whole object list it can
+also reach siblings, so group-scoped behaviors need nothing outside gomplate.
+Invoked with: -d i=<intents> -d b=<catalog> and SERVICE naming the target.
+*/ -}}
+
+{{- define "match" -}}
+{{- $obj := .obj -}}{{- $ok := true -}}
+{{- range $target, $spec := .sel -}}
+  {{- $meta := index $obj $target -}}
+  {{- range $k, $want := (default (coll.Dict) (index $spec "matchValues")) -}}
+    {{- if ne (printf "%v" (index $meta $k)) (printf "%v" $want) }}{{ $ok = false }}{{ end -}}
+  {{- end -}}
+  {{- range $e := (default (coll.Slice) (index $spec "matchExpressions")) -}}
+    {{- $has := coll.Has $meta $e.key -}}
+    {{- $got := "" }}{{ if $has }}{{ $got = printf "%v" (index $meta $e.key) }}{{ end -}}
+    {{- $vals := default (coll.Slice) (index $e "values") -}}
+    {{- if eq $e.operator "Exists" -}}{{ if not $has }}{{ $ok = false }}{{ end }}
+    {{- else if eq $e.operator "DoesNotExist" -}}{{ if $has }}{{ $ok = false }}{{ end }}
+    {{- else if eq $e.operator "In" -}}{{ if not (and $has (has $vals $got)) }}{{ $ok = false }}{{ end }}
+    {{- else if eq $e.operator "NotIn" -}}{{ if and $has (has $vals $got) }}{{ $ok = false }}{{ end }}
+    {{- else if eq $e.operator "Gt" -}}{{ if not (and $has (gt (conv.ToInt64 $got) (conv.ToInt64 (index $vals 0)))) }}{{ $ok = false }}{{ end }}
+    {{- else -}}{{ fail (printf "unknown operator: %s" $e.operator) }}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if $ok }}1{{ end -}}
+{{- end -}}
+
+{{- /* Members of this object's group, selector-matched and name-ordered. */ -}}
+{{- define "group" -}}
+{{- $key := index .obj.labels .behavior.groupBy -}}
+{{- $found := coll.Slice -}}
+{{- range $m := .all -}}
+  {{- if and (eq (tmpl.Exec "match" (coll.Dict "obj" $m "sel" $.behavior.selector)) "1")
+             (eq (printf "%v" (index $m.labels $.behavior.groupBy)) (printf "%v" $key)) -}}
+    {{- $found = coll.Append $m $found -}}
+  {{- end -}}
+{{- end -}}
+{{- coll.Sort "name" $found | data.ToJSON -}}
+{{- end -}}
+
+{{- define "tx-canary-split" -}}
+{{- $w := conv.ToInt64 (index .obj.annotations "canary/weight") -}}
+{{- coll.Dict "canary_weight" (printf "%d" $w) "stable_weight" (printf "%d" (math.Sub 100 $w)) | data.ToJSON -}}
+{{- end -}}
+
+{{- define "tx-pool-members" -}}
+{{- $m := coll.Slice -}}
+{{- range $s := .group }}{{ $m = coll.Append (coll.Dict "name" $s.name "port" $s.spec.port) $m }}{{ end -}}
+{{- coll.Dict "name" (index .obj.labels "pool") "members" $m | data.ToJSON -}}
+{{- end -}}
+
+{{- define "pol-require-managed" -}}
+{{- coll.Slice (coll.Dict "policy" "require-managed" "severity" "warning"
+    "message" (printf "%s carries no managed label; platform behaviors do not apply" .obj.name)) | data.ToJSON -}}
+{{- end -}}
+
+{{- define "pol-unique-ports" -}}
+{{- $held := coll.Dict -}}
+{{- range $s := .group -}}
+  {{- $k := printf "%v" $s.spec.port -}}
+  {{- $held = coll.Merge (coll.Dict $k (coll.Append $s.name (default (coll.Slice) (index $held $k)))) $held -}}
+{{- end -}}
+{{- $out := coll.Slice -}}
+{{- range $k := (coll.Keys $held | coll.Sort) -}}
+  {{- $names := index $held $k -}}
+  {{- if and (gt (len $names) 1) (has $names $.obj.name) -}}
+    {{- $out = coll.Append (coll.Dict "policy" "unique-ports" "severity" "error"
+        "message" (printf "port %s shared inside pool %v by %s" $k (index $.obj.labels "pool") (conv.Join (coll.Sort $names) ", "))) $out -}}
+  {{- end -}}
+{{- end -}}
+{{- $out | data.ToJSON -}}
+{{- end -}}
+
+{{- $all := (ds "i").services -}}
+{{- $obj := "" -}}
+{{- range $s := $all }}{{ if eq $s.name (getenv "SERVICE") }}{{ $obj = $s }}{{ end }}{{ end -}}
+{{- if not $obj }}{{ fail (printf "no such service: %s" (getenv "SERVICE")) }}{{ end -}}
+
+{{- /* Apply in (priority desc, name asc) order, so the first writer of a leaf
+       always holds the higher priority and conflicts need no second pass. */ -}}
+{{- $keyed := coll.Slice -}}
+{{- range $b := (ds "b") -}}
+  {{- $keyed = coll.Append (coll.Merge (coll.Dict "sortkey" (printf "%03d-%s" (math.Sub 999 $b.priority) $b.name)) $b) $keyed -}}
+{{- end -}}
+
+{{- $ctx := coll.Dict -}}{{- $frag := coll.Dict -}}{{- $parts := coll.Slice -}}
+{{- $post := coll.Slice -}}{{- $diags := coll.Slice -}}{{- $owners := coll.Dict -}}
+{{- $off := coll.Dict -}}{{- $records := coll.Slice -}}
+
+{{- range $b := (coll.Sort "sortkey" $keyed) -}}
+  {{- $matched := eq (tmpl.Exec "match" (coll.Dict "obj" $obj "sel" $b.selector)) "1" -}}
+  {{- $rec := coll.Dict "behavior" $b.name "kind" $b.kind "priority" $b.priority
+        "matched" $matched "activated" false -}}
+
+  {{- if and $matched (coll.Has $off $b.name) -}}
+    {{- $rec = coll.Merge (coll.Dict "disabled_by" (index $off $b.name)) $rec -}}
+  {{- else if $matched -}}
+    {{- $rec = coll.Merge (coll.Dict "activated" true) $rec -}}
+    {{- range $d := (default (coll.Slice) (index $b "disables")) -}}
+      {{- if not (coll.Has $off $d) }}{{ $off = coll.Merge (coll.Dict $d $b.name) $off }}{{ end -}}
+    {{- end -}}
+
+    {{- $group := coll.Slice $obj -}}
+    {{- if eq (default "" (index $b "scope")) "group" -}}
+      {{- $group = tmpl.Exec "group" (coll.Dict "obj" $obj "all" $all "behavior" $b) | data.JSONArray -}}
+      {{- $names := coll.Slice }}{{ range $m := $group }}{{ $names = coll.Append $m.name $names }}{{ end -}}
+      {{- $rec = coll.Merge (coll.Dict "group" (coll.Dict
+            "key" (index $obj.labels $b.groupBy) "members" $names)) $rec -}}
+    {{- end -}}
+
+    {{- /* Contribution values are gomplate expressions over the object. */ -}}
+    {{- $give := coll.Dict -}}
+    {{- if eq $b.kind "transform" -}}
+      {{- $give = tmpl.Exec (printf "tx-%s" $b.transform) (coll.Dict "obj" $obj "group" $group) | data.JSON -}}
+    {{- else if coll.Has $b "contributes" -}}
+      {{- range $k, $v := $b.contributes -}}
+        {{- if strings.HasPrefix "map[" (printf "%T" $v) -}}
+          {{- $inner := coll.Dict -}}
+          {{- range $k2, $v2 := $v }}{{ $inner = coll.Merge (coll.Dict $k2 (tmpl.Inline (conv.ToString $v2) $obj)) $inner }}{{ end -}}
+          {{- $give = coll.Merge (coll.Dict $k $inner) $give -}}
+        {{- else -}}
+          {{- $give = coll.Merge (coll.Dict $k (tmpl.Inline (conv.ToString $v) $obj)) $give -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+
+    {{- /* Provenance: first writer of a leaf wins; equal priority is fatal. */ -}}
+    {{- $scope := "" }}{{ if or (eq $b.kind "partial") (eq $b.kind "transform") }}{{ $scope = printf "fragments.%s." $b.partial }}{{ end -}}
+    {{- $flat := coll.Dict -}}
+    {{- range $k, $v := $give -}}
+      {{- if strings.HasPrefix "map[" (printf "%T" $v) -}}
+        {{- range $k2, $v2 := $v }}{{ $flat = coll.Merge (coll.Dict (printf "%s%s.%s" $scope $k $k2) $v2) $flat }}{{ end -}}
+      {{- else -}}
+        {{- $flat = coll.Merge (coll.Dict (printf "%s%s" $scope $k) $v) $flat -}}
+      {{- end -}}
+    {{- end -}}
+    {{- $writes := coll.Slice -}}
+    {{- range $dotted := (coll.Keys $flat | coll.Sort) -}}
+      {{- $leaf := index $flat $dotted -}}
+      {{- if coll.Has $owners $dotted -}}
+        {{- $owner := index $owners $dotted -}}
+        {{- if eq (conv.ToInt64 $owner.priority) (conv.ToInt64 $b.priority) -}}
+          {{- fail (printf "%s and %s both write %s at priority %v" $b.name $owner.name $dotted $b.priority) -}}
+        {{- end -}}
+        {{- $writes = coll.Append (coll.Dict "path" $dotted "value" $leaf "action" "suppressed" "by" $owner.name) $writes -}}
+      {{- else -}}
+        {{- $owners = coll.Merge (coll.Dict $dotted (coll.Dict "name" $b.name "priority" $b.priority)) $owners -}}
+        {{- $writes = coll.Append (coll.Dict "path" $dotted "value" $leaf "action" "set") $writes -}}
+      {{- end -}}
+    {{- end -}}
+    {{- $rec = coll.Merge (coll.Dict "writes" $writes) $rec -}}
+
+    {{- if eq $b.kind "context" -}}
+      {{- $ctx = coll.Merge $ctx $give -}}
+    {{- else if or (eq $b.kind "partial") (eq $b.kind "transform") -}}
+      {{- $frag = coll.Merge $frag (coll.Dict $b.partial $give) -}}
+      {{- if not (has $parts $b.partial) }}{{ $parts = coll.Append $b.partial $parts }}{{ end -}}
+    {{- else if eq $b.kind "policy" -}}
+      {{- $found := tmpl.Exec (printf "pol-%s" $b.policy) (coll.Dict "obj" $obj "group" $group) | data.JSONArray -}}
+      {{- range $d := $found }}{{ $diags = coll.Append $d $diags }}{{ end -}}
+      {{- $rec = coll.Merge (coll.Dict "diagnostics" $found) $rec -}}
+    {{- else if eq $b.kind "postprocess" -}}
+      {{- $post = coll.Append $b.postprocess $post -}}
+    {{- else -}}
+      {{- fail (printf "unknown behavior kind: %s" $b.kind) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $records = coll.Append $rec $records -}}
+{{- end -}}
+
+{{- coll.Dict
+      "name" $obj.name
+      "spec" $obj.spec
+      "context" $ctx
+      "fragments" $frag
+      "partials" $parts
+      "postprocess" $post
+      "diagnostics" (coll.Sort "message" $diags)
+      "explain" $records
+  | data.ToJSONPretty "  " -}}

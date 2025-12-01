@@ -1,0 +1,12 @@
+- name: zz-notin-probe
+  kind: context
+  priority: 5
+  selector:
+    labels:
+      matchExpressions:
+        - key: tls
+          operator: NotIn
+          values: ["true"]
+  contributes:
+    probe:
+      notin: "matched"

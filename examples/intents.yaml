@@ -1,0 +1,63 @@
+services:
+  - name: atlas
+    labels:
+      managed: "true"
+      env: "production"
+      tier: "web"
+      pool: "edge"
+      tls: "true"
+    annotations:
+      metrics/interval: "15s"
+      metrics/path: "/healthz/metrics"
+      canary/weight: "10"
+    spec:
+      port: 8080
+      workers: 4
+
+  - name: beacon
+    labels:
+      managed: "true"
+      env: "production"
+      tier: "web"
+      pool: "edge"
+    annotations:
+      metrics/interval: "30s"
+    spec:
+      port: 8081
+      workers: 2
+
+  - name: cipher
+    labels:
+      managed: "true"
+      env: "staging"
+      tier: "api"
+      pool: "internal"
+      tls: "true"
+    annotations:
+      tls/min-version: "1.2"
+    spec:
+      port: 9000
+      workers: 2
+
+  - name: delta
+    labels:
+      env: "development"
+      tier: "api"
+      pool: "internal"
+    annotations: {}
+    spec:
+      port: 9000
+      workers: 1
+
+  - name: echo
+    labels:
+      managed: "true"
+      env: "production"
+      tier: "web"
+      pool: "edge"
+      ratelimit/exempt: "true"
+    annotations:
+      metrics/interval: "60s"
+    spec:
+      port: 8082
+      workers: 8
